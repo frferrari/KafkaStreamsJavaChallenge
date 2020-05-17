@@ -52,36 +52,35 @@ Then enter the following code, that :
 * then aggregating the values keeping only the count of distinct uids
 
 ```
-val df = spark.read.format("json").load("../../../projects/alpiq/stream_ts_uid.json")
-df.printSchema  
-val metricsDf = df.withColumn("dateMinute", expr("from_unixtime(ts, 'YYYY-MM-dd HH:mm:00')")).groupBy("dateMinute").agg(countDistinct("uid").as("uniqueUsers")).withColumn("tsMinute", unix_timestamp(col("dateMinute"), "yyyy-MM-dd HH:mm:ss")).orderBy(col("dateMinute")).show
+val df = spark.read.format("json").load("../../../projects/alpiq/stream_ts_uid.json").withColumn("dateMinute", expr("from_unixtime(ts, 'YYYY-MM-dd HH:mm:00')"))
+val metricsDf = df.groupBy("dateMinute").agg(countDistinct("uid").as("uniqueUsers")).withColumn("tsMinute", unix_timestamp(col("dateMinute"), "yyyy-MM-dd HH:mm:ss")).orderBy(col("dateMinute")).show
 metricsDf.show
 ```
 
 The result is the following for our log frame example, and this are the values we will be expecting from our Kafka consumer :
 
 ```
-+----------------+-----------+                                                  
-|        tsMinute|uniqueUsers|
-+----------------+-----------+
-|2016-07-11 14:39|      10818|
-|2016-07-11 14:40|      46580|
-|2016-07-11 14:41|      54416|
-|2016-07-11 14:42|      46117|
-|2016-07-11 14:43|      50967|
-|2016-07-11 14:44|      51930|
-|2016-07-11 14:45|      43799|
-|2016-07-11 14:46|      46113|
-|2016-07-11 14:47|      50431|
-|2016-07-11 14:48|      47483|
-|2016-07-11 14:49|      52616|
-|2016-07-11 14:50|      51188|
-|2016-07-11 14:51|      41031|
-|2016-07-11 14:52|      42176|
-|2016-07-11 14:53|      49222|
-|2016-07-11 14:54|      45260|
-|2016-07-11 14:55|       5211|
-+----------------+-----------+
++-------------------+-----------+----------+                                    
+|         dateMinute|uniqueUsers|  tsMinute|
++-------------------+-----------+----------+
+|2016-07-11 14:39:00|      10818|1468244340|
+|2016-07-11 14:40:00|      46580|1468244400|
+|2016-07-11 14:41:00|      54416|1468244460|
+|2016-07-11 14:42:00|      46117|1468244520|
+|2016-07-11 14:43:00|      50967|1468244580|
+|2016-07-11 14:44:00|      51930|1468244640|
+|2016-07-11 14:45:00|      43799|1468244700|
+|2016-07-11 14:46:00|      46113|1468244760|
+|2016-07-11 14:47:00|      50431|1468244820|
+|2016-07-11 14:48:00|      47483|1468244880|
+|2016-07-11 14:49:00|      52616|1468244940|
+|2016-07-11 14:50:00|      51188|1468245000|
+|2016-07-11 14:51:00|      41031|1468245060|
+|2016-07-11 14:52:00|      42176|1468245120|
+|2016-07-11 14:53:00|      49222|1468245180|
+|2016-07-11 14:54:00|      45260|1468245240|
+|2016-07-11 14:55:00|       5211|1468245300|
++-------------------+-----------+----------+
 ```
 
 ## Creating and feeding our input Kafka topic
@@ -151,6 +150,6 @@ Run the project from intellij or ```mvn package``` and run the .jar
 * Tests
 * Produce the metrics as json
 * Input/output topics count of partitions
-* Purging the windowStores
+* Purge the windowStores
 * Measure the performances
 * Metrics in records/sec.
