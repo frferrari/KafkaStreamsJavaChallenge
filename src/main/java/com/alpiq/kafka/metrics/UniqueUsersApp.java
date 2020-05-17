@@ -1,5 +1,6 @@
 package com.alpiq.kafka.metrics;
 
+import com.alpiq.kafka.metrics.consumer.DeduplicationTransformer;
 import com.alpiq.kafka.metrics.consumer.HashSetStringSerde;
 import com.alpiq.kafka.metrics.consumer.LogFrameTimestampExtractor;
 import com.alpiq.kafka.metrics.model.KafkaConfiguration;
@@ -11,8 +12,10 @@ import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
-import org.apache.kafka.streams.kstream.*;
-import org.apache.kafka.streams.processor.ProcessorContext;
+import org.apache.kafka.streams.kstream.KStream;
+import org.apache.kafka.streams.kstream.Produced;
+import org.apache.kafka.streams.kstream.TimeWindows;
+import org.apache.kafka.streams.kstream.Windowed;
 import org.apache.kafka.streams.state.StoreBuilder;
 import org.apache.kafka.streams.state.Stores;
 import org.apache.kafka.streams.state.WindowStore;
@@ -29,7 +32,7 @@ import java.util.Properties;
 
 public class UniqueUsersApp {
     public static final String TIMESTAMP_FORMAT = "yyyy-MM-dd HH:mm";
-    public static final String logFrameStoreName = "log-frames-store";
+    public static final String uidStoreName = "uid-store";
     private final static Logger logger = LoggerFactory.getLogger(UniqueUsersApp.class.getName());
 
     public static void main(String[] args) {
@@ -98,7 +101,7 @@ public class UniqueUsersApp {
 
         final StoreBuilder<WindowStore<String, String>> deduplicationStoreBuilder =
                 Stores.windowStoreBuilder(
-                        Stores.persistentWindowStore(logFrameStoreName,
+                        Stores.persistentWindowStore(uidStoreName,
                                 windowSize,
                                 windowSize,
                                 false
@@ -116,7 +119,7 @@ public class UniqueUsersApp {
                         (k, v, a) -> v)
                 .toStream()
                 .map((Windowed<String> k, String v) -> new KeyValue<>(k.key(), v))
-                .transformValues(() -> new DeduplicationTransformer<>(), logFrameStoreName)
+                .transformValues(() -> new DeduplicationTransformer<>(uidStoreName), uidStoreName)
                 .filter((k, v) -> v != null)
                 .groupByKey()
                 .count()
@@ -189,49 +192,6 @@ public class UniqueUsersApp {
                 .peek((k, v) -> logger.info("k=" + k + " v=" + v))
                 .to(kafkaConfiguration.getProducerTopicName(), Produced.with(Serdes.String(), Serdes.String()));
         */
-    }
-
-    /**
-     * Discards duplicate uids
-     * See: https://kafka-tutorials.confluent.io/finding-distinct-events/kstreams.html
-     * @param <K>
-     * @param <V>
-     * @param <E>
-     */
-    public static class DeduplicationTransformer<K, V, E> implements ValueTransformerWithKey<K, V, V> {
-
-        private ProcessorContext context;
-
-        /**
-         * Key: uid
-         * Value: dummy value
-         */
-        private WindowStore<V, V> uidStore; // TODO purge the window stores
-
-        @Override
-        @SuppressWarnings("unchecked")
-        public void init(final ProcessorContext context) {
-            this.context = context;
-            uidStore = (WindowStore<V, V>) context.getStateStore(logFrameStoreName);
-        }
-
-        @Override
-        public V transform(final K key, final V value) {
-            if (uidStore.fetch(value, context.timestamp()) == null) {
-                // logger.info("context.timestamp=" + context.timestamp() + " key=" + key + " value=" + value + " added");
-                uidStore.put(value, value, context.timestamp());
-                return value;
-            } else {
-                // logger.info("context.timestamp=" + context.timestamp() + " key=" + key + " value=" + value + " already exists, dropped");
-                return null;
-            }
-        }
-
-        @Override
-        public void close() {
-            // Note: The store should NOT be closed manually here via `uidStore.close()`!
-            // The Kafka Streams API will automatically close stores when necessary.
-        }
     }
 
     /**
