@@ -3,23 +3,30 @@ package com.alpiq.kafka.metrics;
 import com.alpiq.kafka.metrics.model.KafkaConfiguration;
 import com.alpiq.kafka.metrics.service.KafkaConfigurationService;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.common.serialization.Deserializer;
+import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.common.utils.Bytes;
+import org.apache.kafka.connect.json.JsonDeserializer;
+import org.apache.kafka.connect.json.JsonSerializer;
 import org.apache.kafka.streams.KafkaStreams;
-import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
-import org.apache.kafka.streams.kstream.*;
-import org.apache.kafka.streams.state.KeyValueStore;
+import org.apache.kafka.streams.kstream.KStream;
+import org.apache.kafka.streams.kstream.Materialized;
+import org.apache.kafka.streams.kstream.Produced;
+import org.apache.kafka.streams.kstream.TimeWindows;
+import org.apache.kafka.streams.state.WindowStore;
 import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.sql.Timestamp;
-import java.text.SimpleDateFormat;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Properties;
 
 public class UniqueUsersApp {
@@ -63,8 +70,32 @@ public class UniqueUsersApp {
 
     static void createUniqueUsersStream(final StreamsBuilder builder, KafkaConfiguration kafkaConfiguration) {
         final KStream<String, String> logFrames = builder.stream(kafkaConfiguration.getConsumerTopicName());
-        String sep = "~";
 
+        Serde<HashSet<String>> hashSetSerde = new HashSetStringSerde();
+
+        // A tumbling window, 1 minute window size
+        TimeWindows tw = TimeWindows.of(Duration.ofMinutes(1)).advanceBy(Duration.ofMinutes(1));
+
+        logFrames
+                .mapValues(UniqueUsersApp::processRecord)
+                .filterNot((tsMinute, uid) -> uid.isEmpty())
+                .groupByKey()
+                .windowedBy(tw)
+                .aggregate(() -> new HashSet<String>(),
+                        (tsMinute, uid, agg) -> {
+                            agg.add(uid);
+                            return agg;
+                        },
+                        Materialized.<String, HashSet<String>, WindowStore<Bytes, byte[]>>as("unique-users-count")
+                                .withKeySerde(Serdes.String())
+                                .withValueSerde(hashSetSerde))
+                .mapValues(HashSet::size)
+                .toStream()
+                .peek((k, v) -> logger.info("k=" + k + " v=" + v))
+                .to(kafkaConfiguration.getProducerTopicName(), Produced.valueSerde(Serdes.Integer()));
+
+        /*
+        String sep = "~";
         logFrames
                 .mapValues(UniqueUsersApp::processRecord)
                 .filterNot((tsMinute, uid) -> uid.isEmpty())
@@ -77,8 +108,10 @@ public class UniqueUsersApp {
                 .groupByKey()
                 .count()
                 .toStream()
-                .peek((k, v) -> logger.info("k="+k+ " v="+v))
+                .peek((k, v) -> logger.info("k=" + k + " v=" + v))
                 .to(kafkaConfiguration.getProducerTopicName(), Produced.with(Serdes.String(), Serdes.Long()));
+         */
+
         /*
         logFrames
                 .mapValues(UniqueUsersApp::processRecord)
@@ -127,6 +160,50 @@ public class UniqueUsersApp {
         } catch (Exception e) {
             logger.error("Could not extract the uid field from the json payload, log frame rejected: " + record);
             return "";
+        }
+    }
+
+    public static final class HashSetStringSerde extends Serdes.WrapperSerde<HashSet<String>> {
+        /*
+        public HashSetSerde(Serializer<HashSet<String>> serializer, Deserializer<HashSet<String>> deserializer) {
+            super(serializer, deserializer);
+        }
+         */
+
+        /*
+        public HashSetStringSerde() {
+            super(new JsonSerializer<>(), new JsonDeserializer(HashSet.class));
+        }
+         */
+
+        public HashSetStringSerde() {
+            super(new Serializer<HashSet<String>>() {
+                @Override
+                public void configure(Map<String, ?> map, boolean b) {
+                }
+
+                @Override
+                public byte[] serialize(String topic, HashSet<String> elements) {
+                    return String.join(",", elements).getBytes();
+                }
+
+                @Override
+                public void close() {
+                }
+            }, new Deserializer<HashSet<String>>() {
+                @Override
+                public void configure(Map<String, ?> configs, boolean isKey) {
+                }
+
+                @Override
+                public HashSet<String> deserialize(String topic, byte[] data) {
+                    return new HashSet<String>(Arrays.asList(Arrays.toString(data).split(",")));
+                }
+
+                @Override
+                public void close() {
+                }
+            });
         }
     }
 }
