@@ -102,7 +102,7 @@ kafka-topics.sh --zookeeper 127.0.0.1:2181 --topic log-frames --create --partiti
 ### Feeding our input Kafka topic
 
 We will use the jq tool to ease the process, the command below allows to inject the log frames in our input topic and adds a key to each record,   
-the key being the conversion of the ts field from the json log frame record, with a minute granularity.
+the key being the conversion of the ts field from the json log frame record, with a minute granularity, as a unix timestamp of seconds.
 
 This allows of course to have all the records with the same key in the same partition, and this will prove useful as we want to count unique
 users per minute. 
@@ -110,7 +110,7 @@ users per minute.
 In the real life, we would expect the producer to do this automatically for us, while sending records to the input topic.
 
 ```
-cat stream.jsonl | jq -r '[(.ts | strftime("%Y-%m-%d %H:%M")),.] | "\(.[0])~\(.[1])"' | kafka-console-producer.sh \
+cat stream.jsonl | jq -r '[(.ts | strftime("%Y-%m-%dT%H:%M:00Z") | fromdate),.] | "\(.[0])~\(.[1])"' | kafka-console-producer.sh \
 --broker-list localhost:9092 \
 --topic log-frames \
 --property "parse.key=true" \
