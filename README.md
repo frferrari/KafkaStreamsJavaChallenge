@@ -54,7 +54,7 @@ Then enter the following code, that :
 ```
 val df = spark.read.format("json").load("../../../projects/alpiq/stream_ts_uid.json")
 df.printSchema  
-val metricsDf = df.withColumn("tsMinute", expr("from_unixtime(ts, 'YYYY-MM-dd HH:mm')")).groupBy("tsMinute").agg(countDistinct("uid").as("uniqueUsers"))
+val metricsDf = df.withColumn("dateMinute", expr("from_unixtime(ts, 'YYYY-MM-dd HH:mm:00')")).groupBy("dateMinute").agg(countDistinct("uid").as("uniqueUsers")).withColumn("tsMinute", unix_timestamp(col("dateMinute"), "yyyy-MM-dd HH:mm:ss")).orderBy(col("dateMinute")).show
 metricsDf.show
 ```
 
@@ -95,9 +95,7 @@ We will use the ts field as our key, allowing us to have all the log frames with
 
 ### Creating our input Kafka topic
 
-```
-kafka-topics.sh --zookeeper 127.0.0.1:2181 --topic log-frames --create --partitions 4 --replication-factor 1
-```
+Please see "Running the project"
 
 ### Feeding our input Kafka topic
 
@@ -117,3 +115,42 @@ cat stream.jsonl | jq -r '[(.ts | strftime("%Y-%m-%dT%H:%M:00Z") | fromdate),.] 
 --property "key.separator=~"
 ```
 
+# Running the project
+
+## Starting zookeeper and kafka
+
+You could start zookeeper and kafka in 2 different terminal so that you can look at the log messages and check if anything fails.
+The below commands have to be started from the kafka directory as the paths to the config files are relative.
+
+```
+zookeeper-server-start.sh config/zookeeper.properties
+
+kafka-server-start.sh config/server.properties
+```
+
+## Creating the kafka topics
+
+```
+kafka-topics.sh --zookeeper 127.0.0.1:2181 --topic log-frames --create --partitions 4 --replication-factor 1
+
+kafka-topics.sh --zookeeper 127.0.0.1:2181 --topic unique-users-metrics --create --partitions 4 --replication-factor 1
+```
+
+## Starting a consumer for the unique users metrics
+
+```
+kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic unique-users-metrics --property print.key=true --property key.deserializer=org.apache.kafka.common.serialization.StringDeserializer --property value.deserializer=org.apache.kafka.common.serialization.LongDeserializer
+```
+
+## Running the project
+
+Run the project from intellij or ```mvn package``` and run the .jar 
+
+# TODO
+
+* Tests
+* Produce the metrics as json
+* Input/output topics count of partitions
+* Purging the windowStores
+* Measure the performances
+* Metrics in records/sec.

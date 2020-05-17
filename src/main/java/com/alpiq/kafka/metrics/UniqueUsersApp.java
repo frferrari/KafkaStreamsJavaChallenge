@@ -7,12 +7,14 @@ import com.alpiq.kafka.metrics.service.KafkaConfigurationService;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.serialization.Serdes;
-import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.kstream.*;
+import org.apache.kafka.streams.processor.ProcessorContext;
+import org.apache.kafka.streams.state.StoreBuilder;
+import org.apache.kafka.streams.state.Stores;
 import org.apache.kafka.streams.state.WindowStore;
 import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
@@ -27,6 +29,7 @@ import java.util.Properties;
 
 public class UniqueUsersApp {
     public static final String TIMESTAMP_FORMAT = "yyyy-MM-dd HH:mm";
+    public static final String logFrameStoreName = "log-frames-store";
     private final static Logger logger = LoggerFactory.getLogger(UniqueUsersApp.class.getName());
 
     public static void main(String[] args) {
@@ -52,11 +55,17 @@ public class UniqueUsersApp {
         }
     }
 
+    /**
+     * Produces the streams configuration
+     *
+     * @param kafkaConfiguration The configuration as defined in the config.properties file
+     * @return A Properties object containing the configuration for our kafka topology
+     */
     static Properties getStreamsConfiguration(KafkaConfiguration kafkaConfiguration) {
         Properties streamsConfiguration = new Properties();
         streamsConfiguration.put(StreamsConfig.APPLICATION_ID_CONFIG, kafkaConfiguration.getApplicationId());
         streamsConfiguration.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, kafkaConfiguration.getBootstrapServers());
-        streamsConfiguration.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest"); // TODO not for production
+        streamsConfiguration.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest"); // TODO earliest is not for production
         streamsConfiguration.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.String().getClass());
         streamsConfiguration.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String().getClass());
         streamsConfiguration.put(StreamsConfig.DEFAULT_TIMESTAMP_EXTRACTOR_CLASS_CONFIG, LogFrameTimestampExtractor.class.getName());
@@ -71,6 +80,12 @@ public class UniqueUsersApp {
         return streamsConfiguration;
     }
 
+    /**
+     * Produces the kafka topology for our unique users metrics
+     *
+     * @param builder            A Streams builders
+     * @param kafkaConfiguration An object containing the configuration of consumer/produced topic names, etc ..
+     */
     static void createUniqueUsersStream(final StreamsBuilder builder, KafkaConfiguration kafkaConfiguration) {
         final KStream<String, String> logFrames = builder.stream(kafkaConfiguration.getConsumerTopicName());
 
@@ -78,7 +93,86 @@ public class UniqueUsersApp {
 
         // We use a tumbling window, 1 minute window size
         // See https://kafka-tutorials.confluent.io/create-tumbling-windows/kstreams.html
-        TimeWindows tw = TimeWindows.of(Duration.ofMinutes(1)).advanceBy(Duration.ofMinutes(1));
+        final Duration windowSize = Duration.ofMinutes(1);
+        TimeWindows tw = TimeWindows.of(windowSize).advanceBy(windowSize);
+
+        final StoreBuilder<WindowStore<String, String>> deduplicationStoreBuilder =
+                Stores.windowStoreBuilder(
+                        Stores.persistentWindowStore(logFrameStoreName,
+                                windowSize,
+                                windowSize,
+                                false
+                        ),
+                        Serdes.String(),
+                        Serdes.String());
+        builder.addStateStore(deduplicationStoreBuilder);
+
+        logFrames
+                .mapValues(UniqueUsersApp::processRecord)
+                .filterNot((tsMinute, uid) -> uid.isEmpty())
+                .groupByKey()
+                .windowedBy(tw)
+                .aggregate(() -> "",
+                        (k, v, a) -> v)
+                .toStream()
+                .map((Windowed<String> k, String v) -> new KeyValue<>(k.key(), v))
+                .transformValues(() -> new DeduplicationTransformer<>(), logFrameStoreName)
+                .filter((k, v) -> v != null)
+                .groupByKey()
+                .count()
+                .toStream()
+                .peek((k, v) -> logger.info("k=" + k + " v=" + v))
+                .to(kafkaConfiguration.getProducerTopicName(), Produced.with(Serdes.String(), Serdes.Long()));
+
+        /*
+        logFrames
+                .mapValues(UniqueUsersApp::processRecord)
+                .filterNot((tsMinute, uid) -> uid.isEmpty())
+                .groupByKey()
+                .windowedBy(tw)
+                .count()
+                .toStream()
+                .map((Windowed<String> k, Long v) -> new KeyValue<>(k.key(), v))
+                .peek((k, v) -> logger.info("k=" + k + " v=" + v))
+                .to(kafkaConfiguration.getProducerTopicName(), Produced.with(Serdes.String(), Serdes.Long()));
+
+         */
+
+        /*
+        Materialized<String, Long, WindowStore<Bytes, byte[]>> materialized =
+                Materialized.<String, Long, WindowStore<Bytes, byte[]>>as("unique-users-count-store")
+                        .withKeySerde(Serdes.String())
+                        .withValueSerde(Serdes.Long());
+        logFrames
+                .mapValues(UniqueUsersApp::processRecord)
+                .filterNot((tsMinute, uid) -> uid.isEmpty())
+                .groupBy((k, v) -> k+"~"+v)
+                .windowedBy(tw)
+                .aggregate(() -> 0L,
+                        (k, v, a) -> 1L,
+                        materialized)
+                .toStream()
+                .map((Windowed<String> k, Long v) -> new KeyValue<>(k.key().split("~")[0], v))
+                .peek((k, v) -> logger.info("k=" + k + " v=" + v))
+                /*
+                .groupByKey()
+                .count()
+                .toStream()
+                .peek((k, v) -> logger.info("k=" + k + " v=" + v))
+                .to(kafkaConfiguration.getProducerTopicName(), Produced.with(Serdes.String(), Serdes.Long()));
+        */
+
+        /*
+        Aggregator<String, String, HashSet<String>> uidAggregator = (tsMinute, uid, uids) -> {
+            // System.out.println("tsMinute="+tsMinute+" uid="+uid+" uids.size="+uids.size());
+            uids.add(uid);
+            return uids;
+        };
+
+        Materialized<String, HashSet<String>, WindowStore<Bytes, byte[]>> materialized =
+                Materialized.<String, HashSet<String>, WindowStore<Bytes, byte[]>>as("unique-users-count-store")
+                        .withKeySerde(Serdes.String())
+                        .withValueSerde(hashSetSerde);
 
         logFrames
                 .mapValues(UniqueUsersApp::processRecord)
@@ -86,18 +180,58 @@ public class UniqueUsersApp {
                 .groupByKey()
                 .windowedBy(tw)
                 .aggregate(() -> new HashSet<String>(),
-                        (tsMinute, uid, agg) -> {
-                            agg.add(uid);
-                            return agg;
-                        },
-                        Materialized.<String, HashSet<String>, WindowStore<Bytes, byte[]>>as("unique-users-count-store")
-                                .withKeySerde(Serdes.String())
-                                .withValueSerde(hashSetSerde))
-                .mapValues(HashSet::size)
+                        uidAggregator,
+                        materialized)
+                // .suppress(Suppressed.untilWindowCloses(unbounded()))
+                .mapValues(v -> Integer.toString(v.size()))
                 .toStream()
-                .map((Windowed<String> k, Integer v) -> new KeyValue<>(k.key(), v))
+                .map((Windowed<String> k, String v) -> new KeyValue<>(k.key(), v))
                 .peek((k, v) -> logger.info("k=" + k + " v=" + v))
-                .to(kafkaConfiguration.getProducerTopicName(), Produced.with(Serdes.String(), Serdes.Integer()));
+                .to(kafkaConfiguration.getProducerTopicName(), Produced.with(Serdes.String(), Serdes.String()));
+        */
+    }
+
+    /**
+     * Discards duplicate uids
+     * See: https://kafka-tutorials.confluent.io/finding-distinct-events/kstreams.html
+     * @param <K>
+     * @param <V>
+     * @param <E>
+     */
+    public static class DeduplicationTransformer<K, V, E> implements ValueTransformerWithKey<K, V, V> {
+
+        private ProcessorContext context;
+
+        /**
+         * Key: uid
+         * Value: dummy value
+         */
+        private WindowStore<V, V> uidStore; // TODO purge the window stores
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public void init(final ProcessorContext context) {
+            this.context = context;
+            uidStore = (WindowStore<V, V>) context.getStateStore(logFrameStoreName);
+        }
+
+        @Override
+        public V transform(final K key, final V value) {
+            if (uidStore.fetch(value, context.timestamp()) == null) {
+                // logger.info("context.timestamp=" + context.timestamp() + " key=" + key + " value=" + value + " added");
+                uidStore.put(value, value, context.timestamp());
+                return value;
+            } else {
+                // logger.info("context.timestamp=" + context.timestamp() + " key=" + key + " value=" + value + " already exists, dropped");
+                return null;
+            }
+        }
+
+        @Override
+        public void close() {
+            // Note: The store should NOT be closed manually here via `uidStore.close()`!
+            // The Kafka Streams API will automatically close stores when necessary.
+        }
     }
 
     /**
