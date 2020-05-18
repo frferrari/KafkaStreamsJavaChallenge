@@ -150,6 +150,6 @@ Run the project from intellij or ```mvn package``` and run the .jar
 * Tests
 * Produce the metrics as json
 * Input/output topics count of partitions
-* Purge the windowStores
+* Purge the windowStores, they are persistent and it does not look like the retention period really works as the counts in deduplicate function always grow
 * Measure the performances
 * Metrics in records/sec.

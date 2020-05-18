@@ -30,6 +30,8 @@ import java.time.Duration;
 import java.util.HashSet;
 import java.util.Properties;
 
+import static org.apache.kafka.streams.kstream.Suppressed.BufferConfig.unbounded;
+
 public class UniqueUsersApp {
     public static final String TIMESTAMP_FORMAT = "yyyy-MM-dd HH:mm";
     public static final String uidStoreName = "uid-store";
@@ -73,6 +75,8 @@ public class UniqueUsersApp {
         streamsConfiguration.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.String().getClass());
         streamsConfiguration.put(StreamsConfig.DEFAULT_TIMESTAMP_EXTRACTOR_CLASS_CONFIG, LogFrameTimestampExtractor.class.getName());
         streamsConfiguration.put(StreamsConfig.CACHE_MAX_BYTES_BUFFERING_CONFIG, 0);
+        streamsConfiguration.put(StreamsConfig.DEFAULT_WINDOWED_KEY_SERDE_INNER_CLASS, Serdes.String().getClass());
+        streamsConfiguration.put(StreamsConfig.DEFAULT_WINDOWED_VALUE_SERDE_INNER_CLASS, Serdes.String().getClass());
         try {
             streamsConfiguration.put(StreamsConfig.STATE_DIR_CONFIG, Files.createTempDirectory("tumbling-windows").toAbsolutePath().toString());
         } catch (IOException e) {
@@ -117,6 +121,8 @@ public class UniqueUsersApp {
         final Duration windowSize = Duration.ofMinutes(1);
         TimeWindows tw = TimeWindows.of(windowSize);
 
+        // Deduplicating events
+        // https://blog.softwaremill.com/de-de-de-de-duplicating-events-with-kafka-streams-ed10cfc59fbe
         final StoreBuilder<WindowStore<String, String>> deduplicationStoreBuilder =
                 Stores.windowStoreBuilder(
                         Stores.persistentWindowStore(uidStoreName,
@@ -134,15 +140,17 @@ public class UniqueUsersApp {
                 .groupByKey()
                 .windowedBy(tw)
                 .aggregate(() -> "", (tsMinute, uid, agg) -> uid)
-                .toStream()
-                .map((Windowed<String> k, String v) -> new KeyValue<>(k.key(), v))
                 .transformValues(() -> new DeduplicationTransformer<>(uidStoreName), uidStoreName)
-                .filter((k, v) -> v != null)
+                // .suppress(Suppressed.untilWindowCloses(unbounded()))
+                .toStream()
+                .filterNot((k, v) -> v == null) // It is important to have this filterNot after the toStream and not before
+                .peek(UniqueUsersApp::peekLoggerWindowed)
+                .map((Windowed<String> k, String v) -> new KeyValue<>(k.key(), v))
                 .groupByKey()
                 .count()
+                // .suppress(Suppressed.untilTimeLimit(windowSize, unbounded()))
                 .toStream()
-                .peek((k, v) -> logger.info("k=" + k + " v=" + v))
-                .to(kafkaConfiguration.getProducerTopicName(), Produced.with(Serdes.String(), Serdes.Long()));
+                .peek(UniqueUsersApp::peekLogger);
     }
 
     static void createUniqueUsersStreamWithWindowStore(final StreamsBuilder builder, KafkaConfiguration kafkaConfiguration) {
@@ -153,29 +161,20 @@ public class UniqueUsersApp {
         final Duration windowSize = Duration.ofMinutes(1);
         TimeWindows tw = TimeWindows.of(windowSize);
 
-        Materialized<String, Long, WindowStore<Bytes, byte[]>> materialized =
-                Materialized.<String, Long, WindowStore<Bytes, byte[]>>as("unique-users-count-store")
+        Materialized<String, String, WindowStore<Bytes, byte[]>> materialized =
+                Materialized.<String, String, WindowStore<Bytes, byte[]>>as("unique-users-count-store")
                         .withKeySerde(Serdes.String())
-                        .withValueSerde(Serdes.Long());
+                        .withValueSerde(Serdes.String());
 
         logFrames
                 .mapValues(UniqueUsersApp::processRecord)
                 .filterNot((tsMinute, uid) -> uid.isEmpty())
-                // .groupBy((k, v) -> k + "~" + v)
                 .groupByKey()
                 .windowedBy(tw)
-                .aggregate(() -> 0L,
-                        (k, v, a) -> 1L,
-                        materialized)
-                .toStream()
-                // .map((Windowed<String> k, Long v) -> new KeyValue<>(k.key().split("~")[0], v))
-                .map((Windowed<String> k, Long v) -> new KeyValue<>(k.key(), v))
-                .peek((k, v) -> logger.info("k=" + k + " v=" + v))
-                .groupByKey()
                 .count()
+                .suppress(Suppressed.untilWindowCloses(unbounded()))
                 .toStream()
-                .peek((k, v) -> logger.info("k=" + k + " v=" + v))
-                .to(kafkaConfiguration.getProducerTopicName(), Produced.with(Serdes.String(), Serdes.Long()));
+                .peek((k, v) -> logger.info("k=" + k.key() + " windowStart=" + k.window().start() + " windowEnd=" + k.window().end() + " v=" + v));
     }
 
     static void createUniqueUsersStreamWithMaterializedHashSet(final StreamsBuilder builder, KafkaConfiguration kafkaConfiguration) {
@@ -231,5 +230,23 @@ public class UniqueUsersApp {
             logger.error("Could not extract the uid field from the json payload, log frame rejected: " + record);
             return "";
         }
+    }
+
+    /**
+     * Utility function that calls peek to log informations regarding the current record
+     * @param wk The windowed record key
+     * @param value The record value
+     */
+    static public <K, V> void peekLoggerWindowed(Windowed<K> wk, V value) {
+        logger.info("k=" + wk.key() + " windowStart=" + wk.window().start() + " windowEnd=" + wk.window().end() + " v=" + value);
+    }
+
+    /**
+     * Utility function that calls peek to log informations regarding the current record
+     * @param k The windowed record key
+     * @param value The record value
+     */
+    static public <K, V> void peekLogger(K k, V value) {
+        logger.info("k=" + k + " v=" + value);
     }
 }

@@ -24,7 +24,7 @@ public class DeduplicationTransformer<K, V, E> implements ValueTransformerWithKe
      * Key: uid
      * Value: dummy value
      */
-    private WindowStore<V, V> uidStore; // TODO purge the window stores
+    private WindowStore<V, V> uidStore;
 
     @Override
     @SuppressWarnings("unchecked")
