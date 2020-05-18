@@ -5,17 +5,17 @@ import com.alpiq.kafka.metrics.consumer.HashSetStringSerde;
 import com.alpiq.kafka.metrics.consumer.LogFrameTimestampExtractor;
 import com.alpiq.kafka.metrics.model.KafkaConfiguration;
 import com.alpiq.kafka.metrics.service.KafkaConfigurationService;
+import org.apache.avro.generic.GenericRecord;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.common.record.Record;
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
-import org.apache.kafka.streams.kstream.KStream;
-import org.apache.kafka.streams.kstream.Produced;
-import org.apache.kafka.streams.kstream.TimeWindows;
-import org.apache.kafka.streams.kstream.Windowed;
+import org.apache.kafka.streams.kstream.*;
 import org.apache.kafka.streams.state.StoreBuilder;
 import org.apache.kafka.streams.state.Stores;
 import org.apache.kafka.streams.state.WindowStore;
@@ -44,7 +44,7 @@ public class UniqueUsersApp {
 
             // Build the kafka stream
             final StreamsBuilder builder = new StreamsBuilder();
-            createUniqueUsersStream(builder, kafkaConfiguration);
+            createUniqueUsersStreamWithDeduplicationTransformer(builder, kafkaConfiguration);
             final KafkaStreams streams = new KafkaStreams(builder.build(), streamsConfiguration);
 
             streams.cleanUp();
@@ -89,15 +89,33 @@ public class UniqueUsersApp {
      * @param builder            A Streams builders
      * @param kafkaConfiguration An object containing the configuration of consumer/produced topic names, etc ..
      */
-    static void createUniqueUsersStream(final StreamsBuilder builder, KafkaConfiguration kafkaConfiguration) {
+    static void createUniqueUsersStreamWithKStreamAndTumblingWindow(final StreamsBuilder builder, KafkaConfiguration kafkaConfiguration) {
         final KStream<String, String> logFrames = builder.stream(kafkaConfiguration.getConsumerTopicName());
-
-        Serde<HashSet<String>> hashSetSerde = new HashSetStringSerde();
 
         // We use a tumbling window, 1 minute window size
         // See https://kafka-tutorials.confluent.io/create-tumbling-windows/kstreams.html
         final Duration windowSize = Duration.ofMinutes(1);
-        TimeWindows tw = TimeWindows.of(windowSize).advanceBy(windowSize);
+        TimeWindows tw = TimeWindows.of(windowSize);
+
+        logFrames
+                .mapValues(UniqueUsersApp::processRecord)
+                .filterNot((tsMinute, uid) -> uid.isEmpty())
+                .groupByKey()
+                .windowedBy(tw)
+                .count()
+                .toStream()
+                .map((Windowed<String> k, Long v) -> new KeyValue<>(k.key(), v))
+                .peek((k, v) -> logger.info("k=" + k + " v=" + v))
+                .to(kafkaConfiguration.getProducerTopicName(), Produced.with(Serdes.String(), Serdes.Long()));
+    }
+
+    static void createUniqueUsersStreamWithDeduplicationTransformer(final StreamsBuilder builder, KafkaConfiguration kafkaConfiguration) {
+        final KStream<String, String> logFrames = builder.stream(kafkaConfiguration.getConsumerTopicName());
+
+        // We use a tumbling window, 1 minute window size
+        // See https://kafka-tutorials.confluent.io/create-tumbling-windows/kstreams.html
+        final Duration windowSize = Duration.ofMinutes(1);
+        TimeWindows tw = TimeWindows.of(windowSize);
 
         final StoreBuilder<WindowStore<String, String>> deduplicationStoreBuilder =
                 Stores.windowStoreBuilder(
@@ -115,8 +133,7 @@ public class UniqueUsersApp {
                 .filterNot((tsMinute, uid) -> uid.isEmpty())
                 .groupByKey()
                 .windowedBy(tw)
-                .aggregate(() -> "",
-                        (k, v, a) -> v)
+                .aggregate(() -> "", (tsMinute, uid, agg) -> uid)
                 .toStream()
                 .map((Windowed<String> k, String v) -> new KeyValue<>(k.key(), v))
                 .transformValues(() -> new DeduplicationTransformer<>(uidStoreName), uidStoreName)
@@ -126,46 +143,51 @@ public class UniqueUsersApp {
                 .toStream()
                 .peek((k, v) -> logger.info("k=" + k + " v=" + v))
                 .to(kafkaConfiguration.getProducerTopicName(), Produced.with(Serdes.String(), Serdes.Long()));
+    }
 
-        /*
-        logFrames
-                .mapValues(UniqueUsersApp::processRecord)
-                .filterNot((tsMinute, uid) -> uid.isEmpty())
-                .groupByKey()
-                .windowedBy(tw)
-                .count()
-                .toStream()
-                .map((Windowed<String> k, Long v) -> new KeyValue<>(k.key(), v))
-                .peek((k, v) -> logger.info("k=" + k + " v=" + v))
-                .to(kafkaConfiguration.getProducerTopicName(), Produced.with(Serdes.String(), Serdes.Long()));
+    static void createUniqueUsersStreamWithWindowStore(final StreamsBuilder builder, KafkaConfiguration kafkaConfiguration) {
+        final KStream<String, String> logFrames = builder.stream(kafkaConfiguration.getConsumerTopicName());
 
-         */
+        // We use a tumbling window, 1 minute window size
+        // See https://kafka-tutorials.confluent.io/create-tumbling-windows/kstreams.html
+        final Duration windowSize = Duration.ofMinutes(1);
+        TimeWindows tw = TimeWindows.of(windowSize);
 
-        /*
         Materialized<String, Long, WindowStore<Bytes, byte[]>> materialized =
                 Materialized.<String, Long, WindowStore<Bytes, byte[]>>as("unique-users-count-store")
                         .withKeySerde(Serdes.String())
                         .withValueSerde(Serdes.Long());
+
         logFrames
                 .mapValues(UniqueUsersApp::processRecord)
                 .filterNot((tsMinute, uid) -> uid.isEmpty())
-                .groupBy((k, v) -> k+"~"+v)
+                // .groupBy((k, v) -> k + "~" + v)
+                .groupByKey()
                 .windowedBy(tw)
                 .aggregate(() -> 0L,
                         (k, v, a) -> 1L,
                         materialized)
                 .toStream()
-                .map((Windowed<String> k, Long v) -> new KeyValue<>(k.key().split("~")[0], v))
+                // .map((Windowed<String> k, Long v) -> new KeyValue<>(k.key().split("~")[0], v))
+                .map((Windowed<String> k, Long v) -> new KeyValue<>(k.key(), v))
                 .peek((k, v) -> logger.info("k=" + k + " v=" + v))
-                /*
                 .groupByKey()
                 .count()
                 .toStream()
                 .peek((k, v) -> logger.info("k=" + k + " v=" + v))
                 .to(kafkaConfiguration.getProducerTopicName(), Produced.with(Serdes.String(), Serdes.Long()));
-        */
+    }
 
-        /*
+    static void createUniqueUsersStreamWithMaterializedHashSet(final StreamsBuilder builder, KafkaConfiguration kafkaConfiguration) {
+        final KStream<String, String> logFrames = builder.stream(kafkaConfiguration.getConsumerTopicName());
+
+        Serde<HashSet<String>> hashSetSerde = new HashSetStringSerde();
+
+        // We use a tumbling window, 1 minute window size
+        // See https://kafka-tutorials.confluent.io/create-tumbling-windows/kstreams.html
+        final Duration windowSize = Duration.ofMinutes(1);
+        TimeWindows tw = TimeWindows.of(windowSize);
+
         Aggregator<String, String, HashSet<String>> uidAggregator = (tsMinute, uid, uids) -> {
             // System.out.println("tsMinute="+tsMinute+" uid="+uid+" uids.size="+uids.size());
             uids.add(uid);
@@ -191,7 +213,6 @@ public class UniqueUsersApp {
                 .map((Windowed<String> k, String v) -> new KeyValue<>(k.key(), v))
                 .peek((k, v) -> logger.info("k=" + k + " v=" + v))
                 .to(kafkaConfiguration.getProducerTopicName(), Produced.with(Serdes.String(), Serdes.String()));
-        */
     }
 
     /**
