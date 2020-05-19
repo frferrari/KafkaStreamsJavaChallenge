@@ -87,7 +87,7 @@ The result is the following for our log frame example, and this are the values w
 
 As already mentioned before, we will use the Kafka console producer tool to inject the log frames in our topic.  
 
-Kafka being distributed by nature, we would like to benefit of its capabilities, and one of the things we should care about from the beginning is the partitioning of the topic our producer will feed, nd the distribution of our data amongst our partitions.
+Kafka being distributed by nature, we would like to benefit of its capabilities, and one of the things we should care about from the beginning is the partitioning of the topic our producer will feed, and the distribution of our data amongst our partitions.
 
 We would like to have more than one partition in our input topic, so this means that we have to specify a key when injecting our data in the input topic using the kafka console producer.
 We will use the ts field as our key, allowing us to have all the log frames with the same ts value in the same partition.
@@ -116,6 +116,24 @@ cat stream.jsonl | jq -r '[(.ts | strftime("%Y-%m-%dT%H:%M:00Z") | fromdate),.] 
 
 # Running the project
 
+In terms of architecture we will have :
+
+* an input topic named log-frames
+  * this topic contains many partitions
+  * the events have a key whose value equals the ts field that we find in each event
+* a consumer that reads events from the input topic :
+  * groups the events per ts field value
+  * applies a window of 1 minute to process the events
+  * transforms the grouped values using a window store to exclude duplicated events based on the uid field
+  * groups the remaining records by ts field
+  * counts the uids (per ts field)
+  * outputs the metrics in an output topic
+* an output topic named unique-users-metrics
+  * feeded by the consumer
+  * unfortunately it contains the ifferent stages of aggregation for the production of the count of users
+  * may be using kafka connect we could solve this problem ?
+  * or another form of aggregator  
+
 ## Starting zookeeper and kafka
 
 You could start zookeeper and kafka in 2 different terminal so that you can look at the log messages and check if anything fails.
@@ -138,12 +156,16 @@ kafka-topics.sh --zookeeper 127.0.0.1:2181 --topic unique-users-metrics --create
 ## Starting a consumer for the unique users metrics
 
 ```
-kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic unique-users-metrics --property print.key=true --property key.deserializer=org.apache.kafka.common.serialization.StringDeserializer --property value.deserializer=org.apache.kafka.common.serialization.LongDeserializer
+kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic unique-users-metrics --property print.key=true --property key.deserializer=org.apache.kafka.common.serialization.StringDeserializer --property value.deserializer=org.apache.kafka.common.serialization.StringDeserializer
 ```
 
 ## Running the project
 
 Run the project from intellij or ```mvn package``` and run the .jar 
+
+## Measuring performance metrics
+
+This could probably be achieved using jconsole / MBeans tab
 
 # TODO
 
@@ -151,5 +173,4 @@ Run the project from intellij or ```mvn package``` and run the .jar
 * Produce the metrics as json
 * Input/output topics count of partitions
 * Purge the windowStores, they are persistent and it does not look like the retention period really works as the counts in deduplicate function always grow
-* Measure the performances
-* Metrics in records/sec.
+
