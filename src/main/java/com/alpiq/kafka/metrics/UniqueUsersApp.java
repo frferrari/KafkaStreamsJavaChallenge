@@ -1,13 +1,11 @@
 package com.alpiq.kafka.metrics;
 
-import com.alpiq.kafka.metrics.consumer.DeduplicationTransformer;
+import com.alpiq.kafka.metrics.consumer.DeduplicateValueTransformer;
 import com.alpiq.kafka.metrics.consumer.HashSetStringSerde;
 import com.alpiq.kafka.metrics.consumer.LogFrameTimestampExtractor;
 import com.alpiq.kafka.metrics.model.KafkaConfiguration;
 import com.alpiq.kafka.metrics.service.KafkaConfigurationService;
-import org.apache.avro.generic.GenericRecord;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.common.record.Record;
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.utils.Bytes;
@@ -35,6 +33,7 @@ import static org.apache.kafka.streams.kstream.Suppressed.BufferConfig.unbounded
 public class UniqueUsersApp {
     public static final String TIMESTAMP_FORMAT = "yyyy-MM-dd HH:mm";
     public static final String uidStoreName = "uid-store";
+    public static final String countStoreName = "count-store";
     private final static Logger logger = LoggerFactory.getLogger(UniqueUsersApp.class.getName());
 
     public static void main(String[] args) {
@@ -46,7 +45,7 @@ public class UniqueUsersApp {
 
             // Build the kafka stream
             final StreamsBuilder builder = new StreamsBuilder();
-            createUniqueUsersStreamWithDeduplicationTransformer(builder, kafkaConfiguration);
+            createUniqueUsersCountStream(builder, kafkaConfiguration);
             final KafkaStreams streams = new KafkaStreams(builder.build(), streamsConfiguration);
 
             streams.cleanUp();
@@ -87,33 +86,7 @@ public class UniqueUsersApp {
         return streamsConfiguration;
     }
 
-    /**
-     * Produces the kafka topology for our unique users metrics
-     *
-     * @param builder            A Streams builders
-     * @param kafkaConfiguration An object containing the configuration of consumer/produced topic names, etc ..
-     */
-    static void createUniqueUsersStreamWithKStreamAndTumblingWindow(final StreamsBuilder builder, KafkaConfiguration kafkaConfiguration) {
-        final KStream<String, String> logFrames = builder.stream(kafkaConfiguration.getConsumerTopicName());
-
-        // We use a tumbling window, 1 minute window size
-        // See https://kafka-tutorials.confluent.io/create-tumbling-windows/kstreams.html
-        final Duration windowSize = Duration.ofMinutes(1);
-        TimeWindows tw = TimeWindows.of(windowSize);
-
-        logFrames
-                .mapValues(UniqueUsersApp::processRecord)
-                .filterNot((tsMinute, uid) -> uid.isEmpty())
-                .groupByKey()
-                .windowedBy(tw)
-                .count()
-                .toStream()
-                .map((Windowed<String> k, Long v) -> new KeyValue<>(k.key(), v))
-                .peek((k, v) -> logger.info("k=" + k + " v=" + v))
-                .to(kafkaConfiguration.getProducerTopicName(), Produced.with(Serdes.String(), Serdes.Long()));
-    }
-
-    static void createUniqueUsersStreamWithDeduplicationTransformer(final StreamsBuilder builder, KafkaConfiguration kafkaConfiguration) {
+    static void createUniqueUsersCountStream(final StreamsBuilder builder, KafkaConfiguration kafkaConfiguration) {
         final KStream<String, String> logFrames = builder.stream(kafkaConfiguration.getConsumerTopicName());
 
         // We use a tumbling window, 1 minute window size
@@ -123,7 +96,7 @@ public class UniqueUsersApp {
 
         // Deduplicating events
         // https://blog.softwaremill.com/de-de-de-de-duplicating-events-with-kafka-streams-ed10cfc59fbe
-        final StoreBuilder<WindowStore<String, String>> deduplicationStoreBuilder =
+        final StoreBuilder<WindowStore<String, String>> deduplicationValueStoreBuilder =
                 Stores.windowStoreBuilder(
                         Stores.persistentWindowStore(uidStoreName,
                                 windowSize,
@@ -132,27 +105,36 @@ public class UniqueUsersApp {
                         ),
                         Serdes.String(),
                         Serdes.String());
-        builder.addStateStore(deduplicationStoreBuilder);
+        builder.addStateStore(deduplicationValueStoreBuilder);
 
-        logFrames
+        KStream<String, String> uniqueUsers = logFrames
                 .mapValues(UniqueUsersApp::processRecord)
                 .filterNot((tsMinute, uid) -> uid.isEmpty())
                 .groupByKey()
                 .windowedBy(tw)
                 .aggregate(() -> "", (tsMinute, uid, agg) -> uid)
-                .transformValues(() -> new DeduplicationTransformer<>(uidStoreName), uidStoreName)
-                // .suppress(Suppressed.untilWindowCloses(unbounded()))
+                .transformValues(() -> new DeduplicateValueTransformer<>(uidStoreName), uidStoreName)
+                // .suppress(Suppressed.untilWindowCloses(unbounded())) // Could not make it work
                 .toStream()
-                .filterNot((k, v) -> v == null) // It is important to have this filterNot after the toStream and not before
+                // Duplicates are marked as null by the transformValue#DeduplicateValueTransformer,
+                //      we must remove this events
+                // It is mandatory to have this filterNot after the toStream and not before it
+                .filterNot((k, v) -> v == null)
                 .peek(UniqueUsersApp::peekLoggerWindowed)
-                .map((Windowed<String> k, String v) -> new KeyValue<>(k.key(), v))
+                .map((Windowed<String> k, String v) -> new KeyValue<>(k.key(), v));
+
+        uniqueUsers
                 .groupByKey()
                 .count()
-                // .suppress(Suppressed.untilTimeLimit(windowSize, unbounded()))
+                .mapValues(Object::toString) // TODO Map it to json
                 .toStream()
-                .peek(UniqueUsersApp::peekLogger);
+                .peek(UniqueUsersApp::peekLogger)
+                .to(kafkaConfiguration.getProducerTopicName());
     }
 
+    /*
+     * Below are experiments that will be removed from the final code base
+     */
     static void createUniqueUsersStreamWithWindowStore(final StreamsBuilder builder, KafkaConfiguration kafkaConfiguration) {
         final KStream<String, String> logFrames = builder.stream(kafkaConfiguration.getConsumerTopicName());
 
@@ -233,8 +215,10 @@ public class UniqueUsersApp {
     }
 
     /**
-     * Utility function that calls peek to log informations regarding the current record
-     * @param wk The windowed record key
+     * Utility function that calls peek to log information regarding the current record
+     * This function is used to process windowed keys
+     *
+     * @param wk    The windowed record key
      * @param value The record value
      */
     static public <K, V> void peekLoggerWindowed(Windowed<K> wk, V value) {
@@ -242,8 +226,10 @@ public class UniqueUsersApp {
     }
 
     /**
-     * Utility function that calls peek to log informations regarding the current record
-     * @param k The windowed record key
+     * Utility function that calls peek to log information regarding the current record
+     * This function is used to process non windowed keys
+     *
+     * @param k     The record key
      * @param value The record value
      */
     static public <K, V> void peekLogger(K k, V value) {
