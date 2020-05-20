@@ -106,8 +106,9 @@ users per minute.
 
 In the real life, we would expect the producer to do this automatically for us, while sending records to the input topic.
 
+// Not working due to time zone ; cat stream.jsonl | jq -r '[(.ts | strftime("%Y-%m-%dT%H:%M:00Z") | fromdate),.] | "\(.[0])~\(.[1])"' | kafka-console-producer.sh \
 ```
-cat stream.jsonl | jq -r '[(.ts | strftime("%Y-%m-%dT%H:%M:00Z") | fromdate),.] | "\(.[0])~\(.[1])"' | kafka-console-producer.sh \
+cat stream.jsonl | jq -r '[(60 * ((.ts / 60) | floor)),.] | "\(.[0])~\(.[1])"' | kafka-console-producer.sh \
 --broker-list localhost:9092 \
 --topic log-frames \
 --property "parse.key=true" \

@@ -100,7 +100,7 @@ public class UniqueUsersApp {
         final StoreBuilder<WindowStore<String, String>> deduplicationValueStoreBuilder =
                 Stores.windowStoreBuilder(
                         Stores.persistentWindowStore(uidStoreName,
-                                windowSize,
+                                windowSize.plusMinutes(1), // TODO for test only
                                 windowSize,
                                 false
                         ),
@@ -111,6 +111,7 @@ public class UniqueUsersApp {
         KStream<String, String> uniqueUsers = logFrames
                 .mapValues(UniqueUsersApp::processRecord)
                 .filterNot((tsMinute, uid) -> uid.isEmpty())
+                // Todo try .groupBy((k, uid) -> uid)
                 .groupByKey()
                 .windowedBy(tw)
                 .aggregate(() -> "", (tsMinute, uid, agg) -> uid)
@@ -223,7 +224,7 @@ public class UniqueUsersApp {
      * @param value The record value
      */
     static public <K, V> void peekLoggerWindowed(Windowed<K> wk, V value) {
-        logger.info("k=" + wk.key() + " windowStart=" + wk.window().start() + " windowEnd=" + wk.window().end() + " v=" + value);
+        logger.info("k=" + wk.key() + " window().start/end=" +wk.window().start() + "/" + wk.window().end() + " window().startTime/endTime=" + wk.window().startTime() + "/" + wk.window().endTime() + " v=" + value);
     }
 
     /**
