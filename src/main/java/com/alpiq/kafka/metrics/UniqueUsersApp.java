@@ -14,7 +14,6 @@ import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.kstream.*;
-import org.apache.kafka.streams.state.KeyValueStore;
 import org.apache.kafka.streams.state.StoreBuilder;
 import org.apache.kafka.streams.state.Stores;
 import org.apache.kafka.streams.state.WindowStore;
@@ -77,6 +76,8 @@ public class UniqueUsersApp {
         streamsConfiguration.put(StreamsConfig.CACHE_MAX_BYTES_BUFFERING_CONFIG, 0);
         streamsConfiguration.put(StreamsConfig.DEFAULT_WINDOWED_KEY_SERDE_INNER_CLASS, Serdes.String().getClass());
         streamsConfiguration.put(StreamsConfig.DEFAULT_WINDOWED_VALUE_SERDE_INNER_CLASS, Serdes.String().getClass());
+        // To clean up window stores https://sachabarbs.wordpress.com/category/kafka/
+        // streamsConfiguration.put(StreamsConfig.WINDOW_STORE_CHANGE_LOG_ADDITIONAL_RETENTION_MS_CONFIG, 10000); // milliseconds
         try {
             streamsConfiguration.put(StreamsConfig.STATE_DIR_CONFIG, Files.createTempDirectory("tumbling-windows").toAbsolutePath().toString());
         } catch (IOException e) {
@@ -96,11 +97,11 @@ public class UniqueUsersApp {
         TimeWindows tw = TimeWindows.of(windowSize);
 
         // Deduplicating events
-        // https://blog.softwaremill.com/de-de-de-de-duplicating-events-with-kafka-streams-ed10cfc59fbe
+        // See https://blog.softwaremill.com/de-de-de-de-duplicating-events-with-kafka-streams-ed10cfc59fbe
         final StoreBuilder<WindowStore<String, String>> deduplicationValueStoreBuilder =
                 Stores.windowStoreBuilder(
                         Stores.persistentWindowStore(uidStoreName,
-                                windowSize.plusMinutes(1), // TODO for test only
+                                windowSize,
                                 windowSize,
                                 false
                         ),
@@ -111,15 +112,13 @@ public class UniqueUsersApp {
         KStream<String, String> uniqueUsers = logFrames
                 .mapValues(UniqueUsersApp::processRecord)
                 .filterNot((tsMinute, uid) -> uid.isEmpty())
-                // Todo try .groupBy((k, uid) -> uid)
                 .groupByKey()
                 .windowedBy(tw)
                 .aggregate(() -> "", (tsMinute, uid, agg) -> uid)
                 .transformValues(() -> new DeduplicateValueTransformer<>(uidStoreName), uidStoreName)
                 // .suppress(Suppressed.untilWindowCloses(unbounded())) // Could not make it work
                 .toStream()
-                // Duplicates are marked as null by the transformValue#DeduplicateValueTransformer,
-                //      we must remove this events
+                // Duplicates are marked as null by the DeduplicateValueTransformer, we must remove this events
                 // It is mandatory to have this filterNot after the toStream and not before it
                 .filterNot((k, v) -> v == null)
                 .peek(UniqueUsersApp::peekLoggerWindowed)
@@ -128,9 +127,9 @@ public class UniqueUsersApp {
         uniqueUsers
                 .groupByKey()
                 .count()
-                .mapValues(Object::toString) // TODO Map it to json
+                .mapValues(Object::toString)
                 .toStream()
-                .peek(UniqueUsersApp::peekLogger)
+                // .peek((k, v) -> logger.info("k=" + k + " count=" + v))
                 .to(kafkaConfiguration.getProducerTopicName());
     }
 

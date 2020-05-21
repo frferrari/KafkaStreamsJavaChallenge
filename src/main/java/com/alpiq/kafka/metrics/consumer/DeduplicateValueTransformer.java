@@ -56,7 +56,8 @@ public class DeduplicateValueTransformer<K, V, E> implements ValueTransformerWit
     }
 
     public void dumpWindowStore() {
-        KeyValueIterator<Windowed<V>, V> it = valueStore.fetchAll(Instant.ofEpochSecond(1468244340L), Instant.ofEpochSecond(1468244520L));
+        // 1468244340L - 1468244520L
+        KeyValueIterator<Windowed<V>, V> it = valueStore.fetchAll(Instant.ofEpochSecond(1468244000L), Instant.ofEpochSecond(1468245000L));
         for (int idx=1; it.hasNext(); idx=idx+1) {
             KeyValue<Windowed<V>, V> item = it.next();
             System.out.println("("+idx+") Window="+item.key+" v="+item.value);

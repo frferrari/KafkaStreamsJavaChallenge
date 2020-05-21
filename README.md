@@ -164,6 +164,26 @@ kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic unique-users
 
 Run the project from intellij or ```mvn package``` and run the .jar 
 
+## Injecting test data
+
+Running the script below allows to inject test data and visualize what is happening in the consumer
+```
+let idx=1
+let ts=1468244340
+
+while [ $ts -le 1468244530 ]
+do
+	js="{\"ts\":$ts,\"uid\":\"$idx\"}" 
+	echo $js | \
+		jq -r '[(60 * ((.ts / 60) | floor)),.] | "\(.[0])~\(.[1])"' | \
+ 		kafka-console-producer.sh --broker-list localhost:9092 --topic log-frames --property "parse.key=true" --property "key.separator=~"
+
+	let ts=ts+10
+	let idx=idx+1
+	sleep 1
+done 
+```
+
 ## Measuring performance metrics
 
 This could probably be achieved using jconsole / MBeans tab
